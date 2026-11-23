@@ -1,13 +1,8 @@
 import math
-import time
-
 from torch.nn import functional as F
 from torch import nn
 import torch
-import os
 import numpy as np
-
-path_dir = os.getcwd()
 
 
 class ConvTrans_decoder(torch.nn.Module):
@@ -22,22 +17,20 @@ class ConvTrans_decoder(torch.nn.Module):
         self.inp_drop = torch.nn.Dropout(input_dropout)
         self.hidden_drop = torch.nn.Dropout(hidden_dropout)
         self.feature_map_drop = torch.nn.Dropout(feature_map_dropout)
-        # 2通道 (head, relation)
         self.bn0_pre = torch.nn.BatchNorm1d(2)
         self.bn1_pre = torch.nn.BatchNorm1d(channels)
         self.conv1_pre = torch.nn.Conv1d(2, channels, kernel_size, stride=1, padding=int(
-            math.floor(kernel_size / 2)))  # kernel size is odd, then padding = math.floor(kernel_size/2)
+            math.floor(kernel_size / 2)))
 
-        # 3通道 (head, relation, DR_local)
         self.bn0 = torch.nn.BatchNorm1d(3)
         self.bn1 = torch.nn.BatchNorm1d(channels)
         self.conv1 = torch.nn.Conv1d(3, channels, kernel_size, stride=1, padding=int(
-            math.floor(kernel_size / 2)))  # kernel size is odd, then padding = math.floor(kernel_size/2)
+            math.floor(kernel_size / 2)))
 
         self.bn2 = torch.nn.BatchNorm1d(h_dim)
         self.fc = torch.nn.Linear(h_dim * channels, h_dim)
         self.layers = nn.ModuleList([DecoderLayer(h_dim, d_k, d_v, n_heads, d_ff, device) for _ in range(n_layers_)])
-        self.g_mlp = nn.Linear(h_dim, num_E)  # 用于随机生成实体概率
+        self.g_mlp = nn.Linear(h_dim, num_E)
         self.query_context_gate = nn.Linear(h_dim * 2, h_dim)
         self.query_context_norm = nn.LayerNorm(h_dim)
         self.rule_mlp = nn.Sequential(
@@ -54,72 +47,33 @@ class ConvTrans_decoder(torch.nn.Module):
         )
 
 
+    def _project_pair(self, subject_state, relation_state, local_state=None):
+        inputs = [subject_state, relation_state]
+        if local_state is None:
+            normalize_inputs, convolve, normalize_channels = self.bn0_pre, self.conv1_pre, self.bn1_pre
+        else:
+            inputs.append(local_state)
+            normalize_inputs, convolve, normalize_channels = self.bn0, self.conv1, self.bn1
+        features = normalize_inputs(torch.stack(inputs, dim=1))
+        features = normalize_channels(convolve(self.inp_drop(features)))
+        features = self.feature_map_drop(F.relu(features))
+        return self.fc(features.flatten(start_dim=1))
+
     def forward(self, facts, ent_embs, rel_embs, e_r_bias,
                 history_tail_seq=None, one_hot_tail_seq=None,
                 freq_info=0,
                 basic_ent_embs=None, basic_rel_embs=None,
                 query_context_state=None, rule_branch_weight=0.0,
                 return_components=False, return_auxiliary=False):
-        # if basic_rel_embs is not None:
-        #     E_embs = F.normalize(basic_ent_embs)
-        #     E_embs = F.tanh(basic_ent_embs)
-        #     e_s = E_embs[facts[:, 0]].unsqueeze(1)
-        #     e_r = basic_rel_embs[facts[:, 1]].unsqueeze(1)
-        #     stacked_inputs = torch.cat([e_s, e_r], 1)  # (batch_size, 3, h_dim)
-        #     stacked_inputs = self.bn0_pre(stacked_inputs)
-        #     x0 = self.inp_drop(stacked_inputs)
-        #     x0 = self.conv1_pre(x0)
-        #     x0 = self.bn1_pre(x0)
-        #     x0 = F.relu(x0)
-        #     x0 = self.feature_map_drop(x0)
-        #     x0 = x0.view(len(facts), -1)  # (batch_size, h_dim*channels)
-        #     x0 = self.fc(x0)  # (batch_size, h_dim)
-        #     score_basic = torch.mm(x0, basic_ent_embs.transpose(1, 0)).to(self.device)  # 计算得分
-        #     score_basic = F.softmax(score_basic, dim=1)
-
-
         score_list = []
         branch_components = None
-        for i in range(len(ent_embs)):
+        for _ in ent_embs[-1:]:
             ent_emb_i = ent_embs[-1]
-            # ent_emb_i = F.tanh(ent_emb_i)
             rel_emb_i = rel_embs[-1]
             e_r_bias_i = e_r_bias[-1]
-        # if 1:
-        #     ent_emb_i = ent_embs
-        #     # ent_emb_i = F.normalize(ent_emb_i)
-        #     ent_emb_i = F.tanh(ent_emb_i)
-        #     rel_emb_i = rel_embs
-        #     e_r_bias_i = e_r_bias
 
-            e_s = ent_emb_i[facts[:, 0]].unsqueeze(1)
-            e_r = rel_emb_i[facts[:, 1]].unsqueeze(1)
-
-            if e_r_bias_i is None:
-                stacked_inputs = torch.cat([e_s, e_r], 1)  # discard local dynamics of relations
-                stacked_inputs = self.bn0_pre(stacked_inputs)
-                x0 = self.inp_drop(stacked_inputs)
-                x0 = self.conv1_pre(x0)
-                x0 = self.bn1_pre(x0)
-            else:
-                bias = e_r_bias_i[facts[:, 0]].unsqueeze(1)
-
-                # stacked_inputs = torch.cat([e_s, e_r + bias], 1)
-                # stacked_inputs = self.bn0_pre(stacked_inputs)
-                # x0 = self.inp_drop(stacked_inputs)
-                # x0 = self.conv1_pre(x0)
-                # x0 = self.bn1_pre(x0)
-
-                stacked_inputs = torch.cat([e_s, e_r, bias], 1)  # (batch_size, 3, h_dim)
-                stacked_inputs = self.bn0(stacked_inputs)
-                x0 = self.inp_drop(stacked_inputs)
-                x0 = self.conv1(x0)
-                x0 = self.bn1(x0)
-
-            x0 = F.relu(x0)
-            x0 = self.feature_map_drop(x0)
-            x0 = x0.view(len(facts), -1)  # (batch_size, h_dim*channels)
-            x0 = self.fc(x0)  # (batch_size, h_dim)
+            local_state = None if e_r_bias_i is None else e_r_bias_i[facts[:, 0]]
+            x0 = self._project_pair(ent_emb_i[facts[:, 0]], rel_emb_i[facts[:, 1]], local_state)
 
 
             x = self.hidden_drop(x0)
@@ -131,10 +85,6 @@ class ConvTrans_decoder(torch.nn.Module):
                 query_context_gate = torch.sigmoid(self.query_context_gate(torch.cat([x, query_context_state], dim=1)))
                 x = self.query_context_norm(x + query_context_gate * query_context_state)
             score = torch.mm(x, ent_emb_i.transpose(1, 0)).to(self.device)
-            # score = F.softmax(score, dim=1)
-            # score_list.append(score)
-
-            # history statistics information
             rule_weight = float(rule_branch_weight)
             rule_weight = max(0.0, min(rule_weight, 0.95))
             if query_context_state is not None and rule_weight > 0:
@@ -147,12 +97,10 @@ class ConvTrans_decoder(torch.nn.Module):
             if freq_info:  # generation mode
                 mask_hist = torch.tensor(np.array(one_hot_tail_seq.cpu() == 0, dtype=float)*(-1000),
                                          device=self.device)
-                # score1 = F.softmax(score)
                 score1 = F.softmax(score + mask_hist, dim=1)
 
                 score2 = self.g_mlp(x)
                 score2 = F.softmax(score2, dim=1)
-                # score2 = F.softmax(score2+mask_gene)
 
                 base_score = score1 * self.alpha + score2 * (1 - self.alpha)
                 if rule_weight > 0 and rule_score is not None:
@@ -164,9 +112,7 @@ class ConvTrans_decoder(torch.nn.Module):
                     "novel": score2 * (1 - self.alpha) * (1 - rule_weight),
                     "rule": rule_score * rule_weight if rule_score is not None else torch.zeros_like(score1),
                 }
-                # score = score1 + score2
                 score_list.append(score)
-                # final_score = torch.log(final_score)
             else:
                 base_score = F.softmax(score, dim=1)
                 if rule_weight > 0 and rule_score is not None:
@@ -179,7 +125,6 @@ class ConvTrans_decoder(torch.nn.Module):
                     "novel": base_score * (1 - rule_weight),
                     "rule": rule_score * rule_weight if rule_score is not None else torch.zeros_like(score),
                 }
-                # score_list.append(score)
 
             break
 
@@ -187,8 +132,6 @@ class ConvTrans_decoder(torch.nn.Module):
         scores_list = [x.unsqueeze(2) for x in score_list]
         score = torch.cat(scores_list, dim=-1)
         score = torch.sum(score, dim=-1)
-        score.squeeze()
-        # score = F.softmax(score)
         score = torch.log(score)
 
 
@@ -207,41 +150,18 @@ class ConvTrans_decoder(torch.nn.Module):
         return score
 
     def pretrain_loss(self, facts, facts_neg, E_embs, R_embs, neg_ratio=1):
-        E_embs = F.normalize(E_embs)
-        E_embs = F.tanh(E_embs)
-        e_s = E_embs[facts[:, 0]].unsqueeze(1)
-        e_r = R_embs[facts[:, 1]].unsqueeze(1)
+        E_embs = F.tanh(F.normalize(E_embs))
         e_o = E_embs[facts[:, 2]]
         e_o_neg = E_embs[facts_neg[:, 2]].view(len(facts), neg_ratio, -1)
-        stacked_inputs = torch.cat([e_s, e_r], 1)  # (batch_size, 3, h_dim)
-
-        stacked_inputs = self.bn0_pre(stacked_inputs)
-        x0 = self.inp_drop(stacked_inputs)
-        x0 = self.conv1_pre(x0)
-        x0 = self.bn1_pre(x0)
-        x0 = F.relu(x0)
-        x0 = self.feature_map_drop(x0)
-        x0 = x0.view(len(facts), -1)  # (batch_size, h_dim*channels)
-        x0 = self.fc(x0)  # (batch_size, h_dim)
+        x0 = self._project_pair(E_embs[facts[:, 0]], R_embs[facts[:, 1]])
         gap = 6
         positive_score = torch.sum(x0 * e_o, dim=1, keepdim=True)
         negative_score = torch.sum(x0.unsqueeze(1) * e_o_neg, dim=2)
         return F.relu(negative_score + gap - positive_score).mean()
 
     def pretrain_predict(self, facts, E_embs, R_embs):
-        E_embs = F.normalize(E_embs)
-        E_embs = F.tanh(E_embs)
-        e_s = E_embs[facts[:, 0]].unsqueeze(1)
-        e_r = R_embs[facts[:, 1]].unsqueeze(1)
-        stacked_inputs = torch.cat([e_s, e_r], 1)  # (batch_size, 3, h_dim)
-        stacked_inputs = self.bn0_pre(stacked_inputs)
-        x0 = self.inp_drop(stacked_inputs)
-        x0 = self.conv1_pre(x0)
-        x0 = self.bn1_pre(x0)
-        x0 = F.relu(x0)
-        x0 = self.feature_map_drop(x0)
-        x0 = x0.view(len(facts), -1)  # (batch_size, h_dim*channels)
-        x0 = self.fc(x0)  # (batch_size, h_dim)
+        E_embs = F.tanh(F.normalize(E_embs))
+        x0 = self._project_pair(E_embs[facts[:, 0]], R_embs[facts[:, 1]])
         scores = torch.mm(x0, E_embs.transpose(1, 0)).to(self.device)
         return scores
 

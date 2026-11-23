@@ -551,7 +551,7 @@ def write_report(output, panel, coverage, lag, controlled, auxiliary, regional, 
         "- Historical neural MRR, seeds and ablations have not been rerun on the revised panel.",
         "## Validation", "", "~~~json", json.dumps(audit, ensure_ascii=False, indent=2), "~~~", "",
         "## Reproduction", "",
-        "Run scripts/coverage_aware_analysis.py with --output-dir pointing to a fresh directory. "
+        "Run scripts/analyze_associations.py with --output-dir pointing to a fresh directory. "
         "Existing outputs are not overwritten. The manifest records hashes and versions.", "",
     ]
     (output / "coverage_analysis_report.md").write_text("\n".join(text), encoding="utf-8")

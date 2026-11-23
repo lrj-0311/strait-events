@@ -27,64 +27,28 @@ def canonical_dataset_name(dataset):
     return dataset
 
 
-def build_sub_graph(num_nodes, num_rels, num_types, facts, device):  #
-    '''
-    :param num_nodes:
-    :param num_rels:
-    :param triples:  [[s, r, o], [s, r, o], ...]
-    :param use_cuda:
-    :param gpu:
-    :return:
-    '''
+def build_sub_graph(num_nodes, num_rels, num_types, facts, device):
+    """Construct a directed snapshot with inverse relations and degree weights."""
+    facts = np.asarray(facts)
+    if facts.ndim != 2 or facts.shape[1] < 3:
+        raise ValueError("facts must have subject, relation, and object columns")
 
-    def comp_deg_norm(g):
-        in_deg = g.in_degrees(range(g.number_of_nodes())).float()
-        out_deg = g.out_degrees(range(g.number_of_nodes())).float()
-        in_deg[torch.nonzero(in_deg == 0).view(-1)] = 1
-        out_deg[torch.nonzero(out_deg == 0).view(-1)] = 1
-        in_norm = 1.0 / in_deg
-        out_norm = 1.0 / out_deg
-        return in_norm, out_norm
+    subject = torch.as_tensor(facts[:, 0], dtype=torch.long)
+    relation = torch.as_tensor(facts[:, 1], dtype=torch.long)
+    obj = torch.as_tensor(facts[:, 2], dtype=torch.long)
+    source = torch.cat((subject, obj))
+    target = torch.cat((obj, subject))
+    edge_type = torch.cat((relation, relation + num_rels))
 
-    def get_typeid(src, src_type):
-        df = pd.DataFrame()
-        df['ent'] = src
-        df['ent_type'] = src_type
-        df = df.sort_values(by=['ent']).drop_duplicates()
-        type_id = df['ent_type'].tolist()
-        return np.array(type_id)
-
-    # inverse_facts = facts[:, [2, 1, 0, 3, 5, 4]]
-    inverse_facts = facts[:, [2, 1, 0, 3]]
-    inverse_facts[:, 1] = inverse_facts[:, 1] + num_rels
-    facts = np.concatenate([facts, inverse_facts])
-    # src, rel, dst, _, src_type, dst_type = facts.transpose()
-    src, rel, dst, _ = facts.transpose()
-
-    g = dgl.DGLGraph()
-    g.add_nodes(num_nodes)
-    g.add_edges(src, dst)
-
-    in_norm, out_norm = comp_deg_norm(g)
-
-    node_id = torch.arange(0, num_nodes, dtype=torch.long).view(-1, 1)  # [0, num_nodes)
-    # type_id = get_typeid(src, src_type)
-    # type_id = torch.from_numpy(type_id).long().view(-1, 1)
-    g.ndata.update(
-        {'id': node_id, 'out_norm': out_norm.view(-1, 1), 'in_norm': in_norm.view(-1, 1)})  # (num_nodes, 1)
-
-    g.apply_edges(lambda edges: {'up_norm': edges.src['in_norm']})
-    g.edata['type'] = torch.LongTensor(rel)
-
-
-    # uniq_e, e_to_r, uniq_r, r_to_r = e_r_info(facts, num_nodes,2*num_rels)
-    # g.uniq_e = uniq_e
-    # g.uniq_r = uniq_r
-    # g.e_to_r = e_to_r
-    # g.r_to_r = r_to_r
-    g = g.to(device)
-
-    return g
+    graph = dgl.graph((source, target), num_nodes=num_nodes)
+    in_norm = graph.in_degrees().clamp_min(1).float().reciprocal()
+    out_norm = graph.out_degrees().clamp_min(1).float().reciprocal()
+    graph.ndata['id'] = torch.arange(num_nodes, dtype=torch.long).unsqueeze(1)
+    graph.ndata['in_norm'] = in_norm.unsqueeze(1)
+    graph.ndata['out_norm'] = out_norm.unsqueeze(1)
+    graph.edata['type'] = edge_type
+    graph.edata['up_norm'] = in_norm.index_select(0, source).unsqueeze(1)
+    return graph.to(device)
 
 
 def e_r_info(facts, num_rels):  # triplets: [[s, r, o], [s, r, o], ...]

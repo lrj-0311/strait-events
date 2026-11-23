@@ -3,8 +3,8 @@ import unittest
 
 import pandas as pd
 
-from scripts.prepare_model_context import FEATURES, prepare_context, prepare_groups
-from scripts.coverage_aware_analysis import add_future_labels, full_week_bounds
+from scripts.prepare_context import FEATURES, prepare_context, prepare_groups
+from scripts.analyze_associations import add_future_labels, full_week_bounds
 
 
 class AlignmentTests(unittest.TestCase):

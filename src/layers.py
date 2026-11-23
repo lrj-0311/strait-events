@@ -128,51 +128,33 @@ class R_GCN(nn.Module):
         self.evolve_loop_weight = nn.Parameter(torch.Tensor(in_feat, out_feat))
         nn.init.xavier_uniform_(self.evolve_loop_weight, gain=nn.init.calculate_gain('relu'))
 
-        self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))  #
+        # Keep unused legacy parameters so existing checkpoints still load.
+        self.skip_connect_weight = nn.Parameter(torch.Tensor(out_feat, out_feat))
         nn.init.xavier_uniform_(self.skip_connect_weight, gain=nn.init.calculate_gain('relu'))
         self.skip_connect_bias = nn.Parameter(torch.Tensor(out_feat))
-        nn.init.zeros_(self.skip_connect_bias)  #
+        nn.init.zeros_(self.skip_connect_bias)
 
         self.weight_neighbor = nn.Parameter(torch.Tensor(self.in_feat, self.out_feat))
         nn.init.xavier_uniform_(self.weight_neighbor, gain=nn.init.calculate_gain('relu'))
 
-    def propagate(self, g):
-        g.update_all(lambda x: self.msg_func(x), fn.sum(msg='msg', out='h'), self.apply_func)
-
-    def msg_func(self, edges):
-        relation = self.rel_embs.index_select(0, edges.data['type']).view(-1, self.out_feat)  #
-        node = edges.src['h'].view(-1, self.out_feat)  #
-        # msg = node + relation + e_r_bias #
-        msg = node + relation #
-        # msg = torch.mul(node, relation)
-
-        msg = torch.mm(msg, self.weight_neighbor)
-        return {'msg': msg}
-
-    def apply_func(self, nodes):
-        return {'h': nodes.data['h'] * nodes.data['in_norm']}  #
-
     def forward(self, g, prev_ent_embs, rel_embs, e_r_bias=None):
-        self.rel_embs = rel_embs
-        node_id = g.ndata['id'].squeeze()
-        g.ndata['h'] = prev_ent_embs[node_id]  #
-        # g.ndata['e_r_bias'] = e_r_bias[node_id]  #
+        node_states = prev_ent_embs.index_select(0, g.ndata['id'].view(-1))
+        source, target = g.edges(order='eid')
+        relation_states = rel_embs.index_select(0, g.edata['type'].view(-1))
+        edge_states = node_states.index_select(0, source) + relation_states
+        edge_messages = edge_states @ self.weight_neighbor
 
-        masked_index = torch.masked_select(
-            torch.arange(0, g.number_of_nodes(), dtype=torch.long, device=g.device),  #
-            (g.in_degrees(range(g.number_of_nodes())) > 0))  #
+        neighbor_sum = node_states.new_zeros((g.num_nodes(), self.out_feat))
+        neighbor_sum.index_add_(0, target, edge_messages)
+        neighbor_mean = neighbor_sum * g.ndata['in_norm']
 
-        loop_message = torch.mm(g.ndata['h'],
-                                self.evolve_loop_weight)  # g.ndata['h']: node embedding (g_num_nodes, h_dim) (h_dim. h_dim)
-        loop_message[masked_index, :] = torch.mm(g.ndata['h'], self.loop_weight)[masked_index, :]
-
-        self.propagate(g)  # calculate the neighbor message with neighbor entity and relation
-        node_repr = g.ndata['h']  # node embedding
-        # skip_weight = F.sigmoid(torch.mm(prev_ent_embs, self.skip_connect_weight) + self.skip_connect_bias)
-        node_repr = node_repr + loop_message
-        # node_repr = skip_weight * node_repr + (1 - skip_weight) * prev_ent_embs
-        node_repr = self.act(node_repr)  #
-        node_repr = self.dropout(node_repr)
-        g.ndata.pop('h')
-        # g.ndata.pop('e_r_bias')
-        return node_repr  # g.ndata['h']
+        has_incoming = (g.in_degrees() > 0).unsqueeze(-1)
+        self_state = torch.where(
+            has_incoming,
+            node_states @ self.loop_weight,
+            node_states @ self.evolve_loop_weight,
+        )
+        updated = neighbor_mean + self_state
+        if self.act is not None:
+            updated = self.act(updated)
+        return self.dropout(updated)
