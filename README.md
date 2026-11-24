@@ -31,4 +31,4 @@ The coverage-aware cross-source analysis uses complete common weeks; the histori
 
 ## License and release
 
-Project-owned code is available under the [MIT License](LICENSE). The graph encoder and convolutional scorer implement established modeling ideas; the research contribution concerns the cross-source analysis and its evaluation, not ownership of those algorithms. Source data and external baseline repositories retain their own terms. This repository remains private for now; project materials will be updated after paper acceptance. Verify provenance and redistribution rights for all remaining model files before changing repository visibility.
+Project-owned code is available under the [MIT License](LICENSE). The graph encoder and convolutional scorer implement established modeling ideas; the research contribution concerns the cross-source analysis and its evaluation, not ownership of those algorithms. Source data and external baseline repositories retain their own terms. This is an initial public code release; project materials will be updated after paper acceptance. The provenance and redistribution rights of remaining model files require further review.
