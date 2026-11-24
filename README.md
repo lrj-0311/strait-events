@@ -1,4 +1,4 @@
-# MUSE-ED methods
+# Strait Events
 
 Method-code snapshot for the weekly GDELT--ACLED analysis and MUSE-ED/MUSE-ED++ dynamic event ranking. This repository contains code only, not licensed source data, checkpoints, or published result tables.
 
